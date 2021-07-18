@@ -21,9 +21,12 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QMessageBox, QTableWidgetItem
+
+from qgis.gui import QgsMapToolEmitPoint, QgsRubberBand
+from qgis.core import QgsProject
 
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -45,9 +48,16 @@ class PipelinePlanner:
         """
         # Save reference to the QGIS interface
         self.iface = iface
+        self.canvas = self.iface.mapCanvas()#variable canvas (mapa)
         # initialize plugin directory
         self.plugin_dir = os.path.dirname(__file__)
         # initialize locale
+        ############################CREAR LAS HERRAMIENTAS DE MAPEO PARA HACER EL PIPELINE
+        self.addPipelinePoint = QgsMapToolEmitPoint(self.canvas)#herramienta para emitir puntos en el canvas (mapa) con cada click
+        self.rbPipeline = QgsRubberBand(self.canvas)#herramienta para hacer lineas en el mapa
+        self.rbPipeline.setColor(Qt.red)
+        self.rbPipeline.setWidth(4)
+        ##########################
         locale = QSettings().value('locale/userLocale')[0:2]
         locale_path = os.path.join(
             self.plugin_dir,
@@ -66,6 +76,10 @@ class PipelinePlanner:
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
+        self.dlg = PipelinePlannerDialog()#crear la instance del dialog box para los resultados
+        self.dlg.tblImpacts.setColumnWidth(1, 75)
+        self.dlg.tblImpacts.setColumnWidth(2, 250)
+        self.dlg.tblImpacts.setColumnWidth(3, 75)
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -169,6 +183,8 @@ class PipelinePlanner:
 
         # will be set False in run()
         self.first_start = True
+        self.addPipelinePoint.canvasClicked.connect(self.evaluatePipeline)#addPipelinePoint estara escuchando cada click en el canvas, para luego enviarlo al method evaluatePipeline
+
 
 
     def unload(self):
@@ -182,19 +198,70 @@ class PipelinePlanner:
 
     def run(self):
         """Run method that performs all the real work"""
+        self.canvas.setMapTool(self.addPipelinePoint)###seteas la herramienta de emision de puntos
 
-        # Create the dialog with elements (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
-            self.first_start = False
-            self.dlg = PipelinePlannerDialog()
+    def evaluatePipeline(self, point, button):
+        if button == Qt.LeftButton:
+            self.rbPipeline.addPoint(point)#con cada punto que manda el method addPipelinePoint, este method agrega el punto a la lista de puntos de la linea
+            self.rbPipeline.show()#este method dibuja la linea en el canvas
+        elif button == Qt.RightButton:
+            pipeline = self.rbPipeline.asGeometry()#guarda la geometria de la linea en la variable
+            self.dlg.tblImpacts.setRowCount(0)#resetea la tabla con cada nueva entrada
+            #QMessageBox.information(None, 'Pipeline', pipeline.asWkt())#muestra un messagebox con la info del WKT del poligono
+            lyrRaptor = QgsProject.instance().mapLayersByName('Raptor Buffer')[0]#referencia a la capa de nidos de raptor
 
-        # show the dialog
-        self.dlg.show()
-        # Run the dialog event loop
-        result = self.dlg.exec_()
-        # See if OK was pressed
-        if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
+            raptors = lyrRaptor.getFeatures(pipeline.boundingBox())#en el method getFeatures de la capa, se mete como argumento el boundingbox de la linea que trazamos
+            for raptor in raptors:
+                valConstraint = raptor.attribute('recentspec')#se toman los valores del attribute y se guardan en la variable  
+                valId = raptor.attribute('Nest_ID')
+                valStatus = raptor.attribute('recentstat')
+                valDistance = pipeline.distance(raptor.geometry().centroid())#la variable pipeline tiene la geometria de la linea que acabamos de trazar, y el method distance(raptor.geometry().centroid()) dara la distancia minima de la geometria del pipeline al centroid del nest
+                if raptor.geometry().intersects(pipeline):#si la gemometria de raptor nest intersecta la gemotria de pipeline, entonces llena la tabla. esto es porque se uso antes todos los features que estuvieran en el boundingbox de pipeline
+                    #insert row
+                    row = self.dlg.tblImpacts.rowCount()#conteo de filas del dialogbox
+                    self.dlg.tblImpacts.insertRow(row)#inserta una fila debajo de la fila numero 'row'
+                    #populate the table
+                    self.dlg.tblImpacts.setItem(row, 0, QTableWidgetItem(valConstraint))#setItem method necesita los argumentos fila (que en este caso 'row' es la ultima fila anadida hasta ahora), columna y item
+                    self.dlg.tblImpacts.setItem(row, 1, QTableWidgetItem(str(valId)))
+                    self.dlg.tblImpacts.setItem(row, 2, QTableWidgetItem(valStatus))
+                    self.dlg.tblImpacts.setItem(row, 3, QTableWidgetItem('{:4.5f}'.format(valDistance))) 
+
+            lyrEagle = QgsProject.instance().mapLayersByName('BAEA Buffer')[0]#referencia a la capa de nidos de raptor
+
+            eagles = lyrEagle.getFeatures(pipeline.boundingBox())#en el method getFeatures de la capa, se mete como argumento el boundingbox de la linea que trazamos
+            for eagle in eagles:
+                valConstraint = 'BAEA nest'
+                valId = eagle.attribute('nest_id')
+                valStatus = eagle.attribute('status')
+                valDistance = pipeline.distance(eagle.geometry().centroid())#la variable pipeline tiene la geometria de la linea que acabamos de trazar, y el method distance(raptor.geometry().centroid()) dara la distancia minima de la geometria del pipeline al centroid del nest
+                if eagle.geometry().intersects(pipeline):#si la gemometria de raptor nest intersecta la gemotria de pipeline, entonces llena la tabla. esto es porque se uso antes todos los features que estuvieran en el boundingbox de pipeline
+                    #insert row
+                    row = self.dlg.tblImpacts.rowCount()#conteo de filas del dialogbox
+                    self.dlg.tblImpacts.insertRow(row)#inserta una fila debajo de la fila numero 'row'
+                    #populate the table
+                    self.dlg.tblImpacts.setItem(row, 0, QTableWidgetItem(valConstraint))#setItem method necesita los argumentos fila (que en este caso 'row' es la ultima fila anadida hasta ahora), columna y item
+                    self.dlg.tblImpacts.setItem(row, 1, QTableWidgetItem(str(valId)))
+                    self.dlg.tblImpacts.setItem(row, 2, QTableWidgetItem(valStatus))
+                    self.dlg.tblImpacts.setItem(row, 3, QTableWidgetItem('{:4.5f}'.format(valDistance))) 
+
+            lyrBuowl = QgsProject.instance().mapLayersByName('BUOWL Buffer')[0]#referencia a la capa de nidos de raptor
+
+            buowls = lyrBuowl.getFeatures(pipeline.boundingBox())#en el method getFeatures de la capa, se mete como argumento el boundingbox de la linea que trazamos
+            for buowl in buowls:
+                valConstraint = 'BUOWL Habitat'
+                valId = buowl.attribute('habitat_id')
+                valStatus = buowl.attribute('recentstat')
+                valDistance = pipeline.distance(buowl.geometry().buffer(-0.001, 5))#la distancia entre la pipeline y un buffer de -0.001 quiere decir que la linea tiene que intersectar un area interna al area actual del habitat del buho
+                if buowl.geometry().intersects(pipeline):#si la gemometria de raptor nest intersecta la gemotria de pipeline, entonces llena la tabla. esto es porque se uso antes todos los features que estuvieran en el boundingbox de pipeline
+                    #insert row
+                    row = self.dlg.tblImpacts.rowCount()#conteo de filas del dialogbox
+                    self.dlg.tblImpacts.insertRow(row)#inserta una fila debajo de la fila numero 'row'
+                    #populate the table
+                    self.dlg.tblImpacts.setItem(row, 0, QTableWidgetItem(valConstraint))#setItem method necesita los argumentos fila (que en este caso 'row' es la ultima fila anadida hasta ahora), columna y item
+                    self.dlg.tblImpacts.setItem(row, 1, QTableWidgetItem(str(valId)))
+                    self.dlg.tblImpacts.setItem(row, 2, QTableWidgetItem(valStatus))
+                    self.dlg.tblImpacts.setItem(row, 3, QTableWidgetItem('{:4.5f}'.format(valDistance))) 
+
+            self.dlg.show()
+
+            self.rbPipeline.reset()#borra la linea del canvas 
